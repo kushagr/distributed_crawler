@@ -1,20 +1,35 @@
 <?php
+	
+	require "predis/autoload.php";
+	Predis\Autoloader::register();
+	
+	//create new workers and assign functions
+	$getResponse_worker = new GearmanWorker();
+	$getResponse_worker->addServer('127.0.0.1', 4730);
+	$getResponse_worker->addFunction("getResponse","get_response_fn");
 
-	$worker = new GearmanWorker();
-	$worker->addServer('127.0.0.1', 4730);
+	$convert_worker = new GearmanWorker();
+	$convert_worker->addServer('127.0.0.1', 4730);
+	$convert_worker->addFunction("convertHTMLToJSON","convert_html_to_json_fn");
 
-	$worker->addFunction("getResponse","get_response_fn");
-	$worker->addFunction("convertHTMLToJSON","convert_html_to_json_fn");
 
+	$background_worker = new GearmanWorker();
+	$background_worker->addServer('127.0.0.1', 4730);
+	$background_worker->addFunction("storeRedis","store_in_redis_fn");
+	
 	while (1) {
 		print "Waiting for a job \n";
 
-		$ret = $worker->work();
-		if ($worker->returnCode() != GEARMAN_SUCCESS)
+		$ret_get = $getResponse_worker->work();
+		$ret_convert = $convert_worker->work();
+		$ret_background = $background_worker->work();
+		if (($getResponse_worker->returnCode() != GEARMAN_SUCCESS) || ($background_worker->returnCode() != GEARMAN_SUCCESS) || ($convert_worker->returnCode() != GEARMAN_SUCCESS))
 			break;
 	}
 
+
 	function get_response_fn($job){
+		echo "Generating response\n";
 		$workload = $job->workload();
 		$ch = curl_init();
 		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -26,28 +41,50 @@
 
 
 	function convert_html_to_json_fn($job){
+		echo "Received job: " . $job->handle() . "\n";
 		$workload = $job->workload();
-
-		echo "Recieved $workload\n";
-		$dom = new DOMDocument();
-		@$dom->loadHTML($workload);
-		$links = $dom->getElementsByTagName('a');
-		foreach($links as $link){
-			$href_attr = $link->getAttribute('href');
-			echo "$href_attr\n";
-
-		}
-
-		
+		//TODO code to convert html to json
+		$arguments = unserialize($workload);
+		echo "Wassup\n";
 
 
-
-
-		// $json_response = json_encode($workload);
-		// $json_file = fopen("json_file", 'w');
-		// fwrite($json_file, $json_response);
-		// echo "Done\n";
-		// return $json_response;
-		return $href_attr;
+		$redis_store_client = new Gearmanclient();
+		$redis_store_client->addServer('127.0.0.1',4730);
+		echo "Sending job to store in redis\n";
+		$redis_store_client->doBackground('storeRedis',$workload);
 	}
+
+
+	function store_in_redis_fn($job){
+		echo "Received Redis job: " . $job->handle() . "\n";
+		$workload = $job->workload();
+		$arguments = unserialize($workload);
+		$response = $arguments[0];
+		$url = $arguments[1];
+		
+		//was recieving an error for port 6379; change the port number as to your liking
+		$redis = new Predis\Client('tcp://127.0.0.1:4567');
+		$domain = get_domain_name($url);
+		$date = date("d/m/y");
+		echo "Storing in redis\n";
+		$redis->sadd("$domain:$url:$date",$response);
+		$redis->sadd("$domain:$url:donedates",$date);
+		$redis->sadd("$domain",$url);
+		echo "Store complete\n";
+	}
+
+
+	function get_domain_name($url){
+		$nowww = ereg_replace('www\.','',$url);
+		$domain = parse_url($nowww);
+		if(!empty($domain["host"])){
+    	    return $domain["host"];
+     	} 
+     	else {
+     	    return $domain["path"];
+     	}
+    }
+
+
+
 ?>
